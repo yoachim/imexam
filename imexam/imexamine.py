@@ -32,6 +32,7 @@ from IPython.display import Image
 
 from astropy.io import fits
 from astropy.modeling import models
+from astropy.visualization import ZScaleInterval
 try:
     from scipy import stats
 except ImportError:
@@ -499,7 +500,7 @@ class Imexamine(object):
         pstr = "plot saved to {0:s}".format(self.plot_name)
         self.log.info(pstr)
 
-    def aper_phot(self, x, y, data=None):
+    def aper_phot(self, x, y, data=None, fig=None):
         """Perform aperture photometry.
 
         uses photutils functions, photutils must be available
@@ -512,7 +513,8 @@ class Imexamine(object):
             The y location of the object
         data: numpy array
             The data array to work on
-
+        fig: figure object for redirect
+            Used for interaction with the ginga GUI
         """
         if data is None:
             data = self._data
@@ -526,6 +528,8 @@ class Imexamine(object):
                 delta = 10
                 amp, x, y, sigma, sigmay = self.gauss_center(x, y, data,
                                                              delta=delta)
+
+            # XXX TODO:  Do I beleive that these all have to be ints?
 
             radius = int(self.aper_phot_pars["radius"][0])
             width = int(self.aper_phot_pars["width"][0])
@@ -541,6 +545,7 @@ class Imexamine(object):
                 subpixels=1,
                 method="center")
 
+            sky_per_pix = None
             if subsky:
                 annulus_apertures = photutils.CircularAnnulus(
                     (x, y), r_in=inner, r_out=outer)
@@ -571,21 +576,65 @@ class Imexamine(object):
             magzero = float(self.aper_phot_pars["zmag"][0])
             mag = magzero - 2.5 * (np.log10(total_flux))
 
-            pheader = (
-                "x\ty\tradius\tflux\tmag(zpt={0:0.2f})\tsky/pix\t".format(magzero)).expandtabs(15)
+            # Construct the output strings (header and parameter values)
+            pheader = "x\ty\tradius\tflux\tmag(zpt={0:0.2f})\t".format(magzero)
+            pstr = "\n{0:.2f}\t{1:0.2f}\t{2:d}\t{3:0.2f}\t{4:0.2f}\t".format(x, y, radius, total_flux, mag)
+
+            if sky_per_pix is not None:
+                pheader += "sky/pix\t"
+                pstr += "{0:0.2f}\t".format(sky_per_pix)
             if center:
-                pheader += ("fwhm(pix)")
-                pstr = "\n{0:.2f}\t{1:0.2f}\t{2:d}\t{3:0.2f}\t{4:0.2f}\t{5:0.2f}\t{6:0.2f}".format(x, y, radius,
-                                                                                                   total_flux, mag,
-                                                                                                   sky_per_pix,
-                                                                                                   math_helper.gfwhm(sigma)[0]).expandtabs(15)
-            else:
-                pstr = "\n{0:0.2f}\t{1:0.2f}\t{2:d}\t{3:0.2f}\t{4:0.2f}\t{5:0.2f}".format(x, y, radius,
-                                                                                          total_flux, mag,
-                                                                                          sky_per_pix).expandtabs(15)
+                pheader += "fwhm(pix)"
+                pstr += "{0:0.2f}".format(math_helper.gfwhm(sigma)[0])
+
+            pheader = pheader.expandtabs(15)
+            pstr = pstr.expandtabs(15)
+
+            # Save the total flux for unit testing things later
+            self.total_flux = total_flux
 
             #  print(pheader + pstr)
             self.log.info(pheader + pstr)
+            if self.aper_phot_pars["genplot"][0]:
+                pfig = fig
+                if fig is None:
+                    # Make sure figure is square so round stars look round
+                    fig = plt.figure(self._figure_name, figsize=[5, 5])
+                fig.clf()
+                fig.add_subplot(111)
+                ax = plt.gca()
+
+                if self.aper_phot_pars["title"][0] is None:
+                    title = "x=%.2f, y=%.2f, flux=%.1f, \nmag=%.1f, sky=%.1f" % (x, y,
+                                                                                 total_flux, mag,
+                                                                                 sky_per_pix)
+                    if center:
+                        title += ", fwhm=%.2f" % math_helper.gfwhm(sigma)[0]
+                    ax.set_title(title)
+                else:
+                    ax.set_title(self.aper_phot_pars["title"][0])
+
+                if self.aper_phot_pars['scale'][0] == 'zscale':
+                    zs = ZScaleInterval()
+                    color_range = zs.get_limits(self._data)
+                else:
+                    color_range = [self.aper_phot_pars['color_min'][0], self.aper_phot_pars['color_max'][0]]
+
+                pad = outer*1.2  # XXX TODO: Bad magic number
+                ax.imshow(self._data[int(y-pad):int(y+pad), int(x-pad):int(x+pad)],
+                          vmin=color_range[0], vmax=color_range[1],
+                          extent=[int(x-pad), int(x+pad), int(y-pad), int(y+pad)], origin='lower',
+                          cmap=self.aper_phot_pars['cmap'][0])
+
+                apertures.plot(ax=ax, color='green', alpha=0.75)
+                if subsky:
+                    annulus_apertures.plot(ax=ax, color='red', alpha=0.75)
+
+                if pfig is None and 'nbagg' not in get_backend().lower():
+                    plt.draw()
+                    plt.pause(0.001)
+                else:
+                    fig.canvas.draw()
 
     def line_fit(self, x, y, data=None, form=None, genplot=True, fig=None, col=False):
         """compute the 1D fit to the line of data using the specified form.
@@ -743,8 +792,7 @@ class Imexamine(object):
                 self.log.info(pstr)
             elif fitform.name is "Polynomial1D":
                 ax.set_title("{0:s} degree={1:d}".format(title, degree))
-                pstr = "({0:d},{1:d}) degree={2:d}".format(
-                          int(x), int(y), degree)
+                pstr = "({0:d},{1:d}) degree={2:d}".format(int(x), int(y), degree)
                 self.log.info(fitted.parameters)
                 self.log.info(pstr)
             elif fitform.name is "AiryDisk2D":
@@ -796,7 +844,7 @@ class Imexamine(object):
         but this is currently not done for Polynomial1D
         """
 
-        result = self.line_fit(x,y,data=data, form=form,
+        result = self.line_fit(x, y, data=data, form=form,
                                genplot=genplot, fig=fig, col=True)
         if not genplot:
             return result
@@ -825,8 +873,8 @@ class Imexamine(object):
             delta = delta/2
 
         delta = int(delta)
-        xx=int(x)
-        yy=int(y)
+        xx = int(x)
+        yy = int(y)
         #  flipped from xpa
         chunk = data[yy - delta:yy + delta, xx - delta:xx + delta]
         try:
@@ -931,8 +979,8 @@ class Imexamine(object):
             if subtract_background:
                 inner = self.radial_profile_pars["skyrad"][0]
                 width = self.radial_profile_pars["width"][0]
-                annulus_apertures = photutils.CircularAnnulus(
-                        (centerx, centery), r_in=inner, r_out=inner+width)
+                annulus_apertures = photutils.CircularAnnulus((centerx, centery),
+                                                              r_in=inner, r_out=inner+width)
                 bkgflux_table = photutils.aperture_photometry(data,
                                                               annulus_apertures)
 
